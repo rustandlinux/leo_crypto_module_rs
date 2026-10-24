@@ -1,0 +1,13 @@
+target/
+*.scmblob
+*.kek
+*.log
+
+# 本地与构建缓存配置
+Makefile
+include/
+docs/
+*.c
+*.h
+tests/test_scm
+tests/test_multithread_key_race

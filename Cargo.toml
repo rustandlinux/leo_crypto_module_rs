@@ -1,0 +1,38 @@
+[package]
+name = "leo_crypto_module_rs"
+version = "1.0.2"
+edition = "2021"
+
+[lib]
+name = "scm"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["x86-asm"]
+x86-asm = []
+
+[dependencies]
+# 国密与基础加密算法
+sm3 = "0.5"
+
+# 随机数与敏感内存擦除
+rand = "0.8"
+rand_core = "0.6"
+zeroize = { version = "1.8", features = ["derive", "zeroize_derive"] }
+subtle = "2.6"
+
+# 并发与工具
+parking_lot = "0.12"
+lazy_static = "1.5"
+tempfile = "3.10"
+libc = "0.2"
+fips203 = "0.4.3"
+fips204 = "0.4.6"
+falcon-rs = "0.3.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
