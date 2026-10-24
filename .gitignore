@@ -2,6 +2,7 @@ target/
 *.scmblob
 *.kek
 *.log
+private-log/
 
 # 本地与构建缓存配置
 Makefile
