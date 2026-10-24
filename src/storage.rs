@@ -493,7 +493,7 @@ pub unsafe extern "C" fn scm_storage_secure_delete(path: *const c_char) -> c_int
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rand::{scm_rand_init, scm_rand_cleanup};
+    use crate::rand::scm_rand_init;
 
     #[test]
     fn test_storage_full_lifecycle() {
@@ -540,6 +540,5 @@ mod tests {
             assert_eq!(scm_storage_secure_delete(kek_path.as_ptr() as *const _), SCM_OK);
         }
         scm_storage_cleanup();
-        scm_rand_cleanup();
     }
 }

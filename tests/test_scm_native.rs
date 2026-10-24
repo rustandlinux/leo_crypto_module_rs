@@ -982,6 +982,7 @@ fn test_sdf_open_session(st: &mut SdfState) -> bool {
 }
 
 fn test_sdf_device_info(st: &SdfState) -> bool {
+    assert_eq!(std::mem::size_of::<DEVICEINFO>(), 100, "DEVICEINFO size must strictly conform to GM/T 0018 (100 bytes)");
     let mut info: DEVICEINFO = unsafe { std::mem::zeroed() };
     unsafe {
         if SDF_GetDeviceInfo(st.ses, &mut info) != SDR_OK {
@@ -1037,7 +1038,29 @@ fn test_sdf_external_sign_verify(st: &SdfState) -> bool {
         if SDF_ExternalSign_ECC(st.ses, SGD_SM2_1, &mut sk, msg.as_mut_ptr(), 3, &mut sig) != SDR_OK {
             return false;
         }
-        SDF_ExternalVerify_ECC(st.ses, SGD_SM2_1, &mut pk, msg.as_mut_ptr(), 3, &mut sig) == SDR_OK
+        if SDF_ExternalVerify_ECC(st.ses, SGD_SM2_1, &mut pk, msg.as_mut_ptr(), 3, &mut sig) != SDR_OK {
+            return false;
+        }
+
+        // 同时验证 GM/T 0018 标准两阶段流程 (SDF_HashInit 带自定义 ID -> HashFinal -> 32 字节摘要签名)
+        let mut custom_id = *b"ALICE123@TEST.COM";
+        let mut raw_data = *b"Standard GM/T 0018 Signing Payload Test";
+        if SDF_HashInit(st.ses, SGD_SM3, &mut pk, custom_id.as_mut_ptr(), custom_id.len() as u32) != SDR_OK {
+            return false;
+        }
+        if SDF_HashUpdate(st.ses, raw_data.as_mut_ptr(), raw_data.len() as u32) != SDR_OK {
+            return false;
+        }
+        let mut hash_e = [0u8; 32];
+        let mut hlen = 32u32;
+        if SDF_HashFinal(st.ses, hash_e.as_mut_ptr(), &mut hlen) != SDR_OK {
+            return false;
+        }
+        let mut sig_std: ECCSignature = std::mem::zeroed();
+        if SDF_ExternalSign_ECC(st.ses, SGD_SM2_1, &mut sk, hash_e.as_mut_ptr(), 32, &mut sig_std) != SDR_OK {
+            return false;
+        }
+        SDF_ExternalVerify_ECC(st.ses, SGD_SM2_1, &mut pk, hash_e.as_mut_ptr(), 32, &mut sig_std) == SDR_OK
     }
 }
 
@@ -1112,7 +1135,26 @@ fn test_sdf_session_key_kek(st: &SdfState) -> bool {
             return false;
         }
         let ok = declen == 32 && dec == data;
-        SDF_DestroyKey(st.ses, kh);
+        if SDF_DestroyKey(st.ses, kh) != SDR_OK {
+            return false;
+        }
+
+        // 验证单向仅加密直接销毁场景（无解密调用，连续超过 64 槽位上限验证不泄漏）
+        for _ in 0..70 {
+            let mut kh_enc_only: *mut c_void = std::ptr::null_mut();
+            klen = enc_key.len() as u32;
+            enclen = enc.len() as u32;
+            if SDF_GenerateKeyWithKEK(st.ses, 128, SGD_SM4_CBC, 1, enc_key.as_mut_ptr(), &mut klen, &mut kh_enc_only) != SDR_OK {
+                return false;
+            }
+            if SDF_Encrypt(st.ses, kh_enc_only, SGD_SM4_CBC, iv.as_mut_ptr(), data.as_mut_ptr(), 32, enc.as_mut_ptr(), &mut enclen) != SDR_OK {
+                return false;
+            }
+            if SDF_DestroyKey(st.ses, kh_enc_only) != SDR_OK {
+                return false;
+            }
+        }
+
         ok
     }
 }

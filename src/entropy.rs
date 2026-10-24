@@ -14,6 +14,7 @@ pub const SCM_ENT_PROCINFO: u32  = 1 << 5;
 pub const SCM_ENT_ALL: u32       = 0x3F;
 
 #[no_mangle]
+#[allow(unused_mut)]
 pub extern "C" fn scm_entropy_available() -> u32 {
     let mut mask = SCM_ENT_GETRANDOM | SCM_ENT_URANDOM | SCM_ENT_JITTER | SCM_ENT_PROCINFO;
     #[cfg(target_arch = "x86_64")]

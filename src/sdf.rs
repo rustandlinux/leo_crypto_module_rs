@@ -78,8 +78,9 @@ pub struct ECCSignature {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct DEVICEINFO {
-    pub IssuerName: [[c_char; 64]; 8],
+    pub IssuerName: [c_char; 40],
     pub DeviceName: [c_char; 16],
     pub DeviceSerial: [c_char; 16],
     pub DeviceVersion: u32,
@@ -392,8 +393,10 @@ pub unsafe extern "C" fn SDF_GetDeviceInfo(
     }
     let info = &mut *pstDeviceInfo;
     *info = std::mem::zeroed();
+    let issuer = b"SCM-Crypto-Issuer\0";
     let dev_name = b"SCM-Rust-Crypto\0";
     let dev_ser = b"SCM202610220001\0";
+    for (i, &b) in issuer[..18].iter().enumerate() { info.IssuerName[i] = b as c_char; }
     for (i, &b) in dev_name[..16].iter().enumerate() { info.DeviceName[i] = b as c_char; }
     for (i, &b) in dev_ser[..16].iter().enumerate() { info.DeviceSerial[i] = b as c_char; }
     info.DeviceVersion = 0x010002;
@@ -855,10 +858,11 @@ pub unsafe extern "C" fn SDF_DestroyKey(
         return SDR_PARDENY;
     }
 
-    if k.refcount == 0 {
+    if k.refcount == 0 || k.destroy_pending != 0 {
         k.zeroize();
         k.used = 0;
         k.destroy_pending = 0;
+        k.refcount = 0;
     } else {
         k.destroy_pending = 1;
     }
@@ -907,12 +911,17 @@ pub unsafe extern "C" fn SDF_ExternalSign_ECC(
     }
     let mut key = SCM_SM2_KEY { private_key: [0; 32], public_key: [0; 64] };
     key.private_key.copy_from_slice(&(*pucPrivateKey).K);
-    if scm_sm2_derive_pub(&mut key) != SCM_OK {
-        return SDR_COMMFAIL;
-    }
 
     let mut sig = [0u8; 64];
-    let rc = scm_sm2_sign(&key, pucData, uiDataLength as usize, sig.as_mut_ptr());
+    let rc = if uiDataLength == 32 {
+        scm_sm2_sign_digest(&key, pucData, sig.as_mut_ptr())
+    } else {
+        if scm_sm2_derive_pub(&mut key) != SCM_OK {
+            key.zeroize();
+            return SDR_COMMFAIL;
+        }
+        scm_sm2_sign(&key, pucData, uiDataLength as usize, sig.as_mut_ptr())
+    };
     key.zeroize();
     if rc != SCM_OK { return SDR_COMMFAIL; }
 
@@ -944,7 +953,12 @@ pub unsafe extern "C" fn SDF_ExternalVerify_ECC(
     sig[0..32].copy_from_slice(&sig_st.r);
     sig[32..64].copy_from_slice(&sig_st.s);
 
-    if scm_sm2_verify(pub_64.as_ptr(), pucData, uiDataLength as usize, sig.as_ptr()) == SCM_OK {
+    let rc = if uiDataLength == 32 {
+        scm_sm2_verify_digest(pub_64.as_ptr(), pucData, sig.as_ptr())
+    } else {
+        scm_sm2_verify(pub_64.as_ptr(), pucData, uiDataLength as usize, sig.as_ptr())
+    };
+    if rc == SCM_OK {
         SDR_OK
     } else {
         SDR_VERIFYERR
@@ -973,7 +987,12 @@ pub unsafe extern "C" fn SDF_InternalSign_ECC(
     if ik.used == 0 { return SDR_KEYNOTEXIST; }
 
     let mut sig = [0u8; 64];
-    if scm_sm2_sign(&ik.sign_key, pucData, uiDataLength as usize, sig.as_mut_ptr()) != SCM_OK {
+    let rc = if uiDataLength == 32 {
+        scm_sm2_sign_digest(&ik.sign_key, pucData, sig.as_mut_ptr())
+    } else {
+        scm_sm2_sign(&ik.sign_key, pucData, uiDataLength as usize, sig.as_mut_ptr())
+    };
+    if rc != SCM_OK {
         return SDR_COMMFAIL;
     }
 
@@ -1003,7 +1022,12 @@ pub unsafe extern "C" fn SDF_InternalVerify_ECC(
     sig[0..32].copy_from_slice(&sig_st.r);
     sig[32..64].copy_from_slice(&sig_st.s);
 
-    if scm_sm2_verify(ik.sign_key.public_key.as_ptr(), pucData, uiDataLength as usize, sig.as_ptr()) == SCM_OK {
+    let rc = if uiDataLength == 32 {
+        scm_sm2_verify_digest(ik.sign_key.public_key.as_ptr(), pucData, sig.as_ptr())
+    } else {
+        scm_sm2_verify(ik.sign_key.public_key.as_ptr(), pucData, uiDataLength as usize, sig.as_ptr())
+    };
+    if rc == SCM_OK {
         SDR_OK
     } else {
         SDR_VERIFYERR
@@ -1079,9 +1103,9 @@ pub unsafe extern "C" fn SDF_ExternalDecrypt_ECC(
 pub unsafe extern "C" fn SDF_HashInit(
     hSessionHandle: *mut c_void,
     uiAlgID: u32,
-    _pucPublicKey: *mut ECCrefPublicKey,
-    _pucID: *mut u8,
-    _uiIDLength: u32,
+    pucPublicKey: *mut ECCrefPublicKey,
+    pucID: *mut u8,
+    uiIDLength: u32,
 ) -> c_int {
     if hSessionHandle.is_null() || uiAlgID != SGD_SM3 {
         return SDR_PARDENY;
@@ -1089,8 +1113,22 @@ pub unsafe extern "C" fn SDF_HashInit(
     let s = &mut *(hSessionHandle as *mut SessionCtx);
     if s.magic != SES_MAGIC { return SDR_PARDENY; }
 
-    // lock held conceptually
-    s.hash_ctx = Some(Box::new(sm3::Sm3::new()));
+    let mut hasher = sm3::Sm3::new();
+    if !pucPublicKey.is_null() {
+        use sm3::Digest;
+        let pk = &*pucPublicKey;
+        let id_slice: &[u8] = if !pucID.is_null() && uiIDLength > 0 {
+            if uiIDLength > 8191 {
+                return SDR_PARDENY;
+            }
+            std::slice::from_raw_parts(pucID, uiIDLength as usize)
+        } else {
+            DEFAULT_ID
+        };
+        let za = compute_za(id_slice, &pk.x, &pk.y);
+        hasher.update(&za);
+    }
+    s.hash_ctx = Some(Box::new(hasher));
     s.hash_inited = true;
     SDR_OK
 }

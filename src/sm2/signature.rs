@@ -52,21 +52,12 @@ pub fn compute_e(za: &[u8; 32], msg: &[u8]) -> [u8; 32] {
     out
 }
 
-/// SM2 签名算法
-pub fn sm2_sign(
+/// SM2 针对已哈希摘要 e (mod n) 的数字签名核心算子
+pub fn sm2_sign_digest(
     da: &Scalar,
-    pk_point: &JacobianPoint,
-    msg: &[u8],
+    e: &Scalar,
     rng_k: impl Fn() -> [u8; 32],
 ) -> Result<[u8; 64], ()> {
-    let (pk_x, pk_y) = pk_point.to_affine().ok_or(())?;
-    let pk_x_b = pk_x.to_bytes_be();
-    let pk_y_b = pk_y.to_bytes_be();
-
-    let za = compute_za(DEFAULT_ID, &pk_x_b, &pk_y_b);
-    let e_bytes = compute_e(&za, msg);
-    let e = Scalar::from_bytes_be_mod_n(&e_bytes);
-
     let one = Scalar::ONE;
     let d_plus_1 = *da + one;
     let inv_d = d_plus_1.inv();
@@ -86,7 +77,7 @@ pub fn sm2_sign(
         };
 
         let x1_scalar = Scalar::from_bytes_be_mod_n(&x1.to_bytes_be());
-        let r = e + x1_scalar;
+        let r = *e + x1_scalar;
         if r.is_zero() || (r + k).is_zero() {
             continue;
         }
@@ -109,10 +100,38 @@ pub fn sm2_sign(
     Err(())
 }
 
-/// SM2 验签算法
-pub fn sm2_verify(
-    pk_bytes: &[u8; 64],
+/// SM2 签名算法 (默认 ID)
+pub fn sm2_sign(
+    da: &Scalar,
+    pk_point: &JacobianPoint,
     msg: &[u8],
+    rng_k: impl Fn() -> [u8; 32],
+) -> Result<[u8; 64], ()> {
+    sm2_sign_with_id(da, pk_point, DEFAULT_ID, msg, rng_k)
+}
+
+/// SM2 签名算法 (支持自定义用户身份 ID)
+pub fn sm2_sign_with_id(
+    da: &Scalar,
+    pk_point: &JacobianPoint,
+    id: &[u8],
+    msg: &[u8],
+    rng_k: impl Fn() -> [u8; 32],
+) -> Result<[u8; 64], ()> {
+    let (pk_x, pk_y) = pk_point.to_affine().ok_or(())?;
+    let pk_x_b = pk_x.to_bytes_be();
+    let pk_y_b = pk_y.to_bytes_be();
+
+    let za = compute_za(id, &pk_x_b, &pk_y_b);
+    let e_bytes = compute_e(&za, msg);
+    let e = Scalar::from_bytes_be_mod_n(&e_bytes);
+    sm2_sign_digest(da, &e, rng_k)
+}
+
+/// SM2 针对已哈希摘要 e (mod n) 的验证核心算子
+pub fn sm2_verify_digest(
+    pk_bytes: &[u8; 64],
+    e: &Scalar,
     sig: &[u8; 64],
 ) -> bool {
     let mut pk_x_b = [0u8; 32];
@@ -152,10 +171,6 @@ pub fn sm2_verify(
         return false;
     }
 
-    let za = compute_za(DEFAULT_ID, &pk_x_b, &pk_y_b);
-    let e_bytes = compute_e(&za, msg);
-    let e = Scalar::from_bytes_be_mod_n(&e_bytes);
-
     // P1 = [s]G + [t]PA
     let p1 = JacobianPoint::double_mul_scalar(&s, &t, &pk_point);
     let (x1, _) = match p1.to_affine() {
@@ -164,9 +179,36 @@ pub fn sm2_verify(
     };
 
     let x1_scalar = Scalar::from_bytes_be_mod_n(&x1.to_bytes_be());
-    let r_calc = e + x1_scalar;
+    let r_calc = *e + x1_scalar;
 
     r_calc == r
+}
+
+/// SM2 验签算法 (默认 ID)
+pub fn sm2_verify(
+    pk_bytes: &[u8; 64],
+    msg: &[u8],
+    sig: &[u8; 64],
+) -> bool {
+    sm2_verify_with_id(pk_bytes, DEFAULT_ID, msg, sig)
+}
+
+/// SM2 验签算法 (支持自定义用户身份 ID)
+pub fn sm2_verify_with_id(
+    pk_bytes: &[u8; 64],
+    id: &[u8],
+    msg: &[u8],
+    sig: &[u8; 64],
+) -> bool {
+    let mut pk_x_b = [0u8; 32];
+    let mut pk_y_b = [0u8; 32];
+    pk_x_b.copy_from_slice(&sig_slice_32(&pk_bytes[0..32]));
+    pk_y_b.copy_from_slice(&sig_slice_32(&pk_bytes[32..64]));
+
+    let za = compute_za(id, &pk_x_b, &pk_y_b);
+    let e_bytes = compute_e(&za, msg);
+    let e = Scalar::from_bytes_be_mod_n(&e_bytes);
+    sm2_verify_digest(pk_bytes, &e, sig)
 }
 
 #[inline(always)]

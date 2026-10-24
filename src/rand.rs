@@ -123,7 +123,10 @@ pub extern "C" fn scm_rand_cleanup() {
 pub unsafe extern "C" fn scm_rand_reseed() -> c_int {
     let mut state = DRBG.lock();
     if !state.initialized {
-        return SCM_ERR_STATE;
+        let rc = state.instantiate();
+        if rc != SCM_OK {
+            return rc;
+        }
     }
     let mut entropy = [0u8; DRBG_SEED_LEN];
     let rc = scm_entropy_collect(
@@ -152,7 +155,10 @@ pub unsafe extern "C" fn scm_rand_bytes(
     }
     let mut state = DRBG.lock();
     if !state.initialized {
-        return SCM_ERR_STATE;
+        let rc = state.instantiate();
+        if rc != SCM_OK {
+            return rc;
+        }
     }
 
     if state.generated + (len as u64) > RESEED_INTERVAL {

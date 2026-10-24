@@ -17,7 +17,11 @@ pub mod x86_adx;
 pub use field::FieldElement;
 pub use scalar::Scalar;
 pub use curve::{JacobianPoint, AffinePoint};
-pub use signature::{sm2_sign, sm2_verify, compute_za, compute_e, DEFAULT_ID};
+pub use signature::{
+    sm2_sign, sm2_sign_with_id, sm2_sign_digest,
+    sm2_verify, sm2_verify_with_id, sm2_verify_digest,
+    compute_za, compute_e, DEFAULT_ID,
+};
 pub use encrypt::{sm2_encrypt_raw, sm2_decrypt_raw, SCM_SM2_MAX_PLAINTEXT, SCM_SM2_C123_OVERHEAD};
 pub use exchange::sm2_key_exchange_raw;
 
@@ -165,6 +169,39 @@ pub unsafe extern "C" fn scm_sm2_sign(
     SCM_OK
 }
 
+/// 导出 FFI 跨语言接口: SM2 针对已哈希摘要 e 进行签名
+#[no_mangle]
+pub unsafe extern "C" fn scm_sm2_sign_digest(
+    key: *const SCM_SM2_KEY,
+    digest: *const u8,
+    sig_out: *mut u8,
+) -> c_int {
+    if key.is_null() || digest.is_null() || sig_out.is_null() {
+        return SCM_ERR_PARAM;
+    }
+    let k = &*key;
+    let da = match Scalar::from_bytes_be(&k.private_key) {
+        Some(s) if !s.is_zero() => s,
+        _ => return SCM_ERR_PARAM,
+    };
+    let dig_slice = std::slice::from_raw_parts(digest, 32);
+    let mut dig_arr = [0u8; 32];
+    dig_arr.copy_from_slice(dig_slice);
+    let e = Scalar::from_bytes_be_mod_n(&dig_arr);
+
+    let sig = match sm2_sign_digest(&da, &e, || {
+        let mut b = [0u8; 32];
+        get_random_bytes(&mut b);
+        b
+    }) {
+        Ok(s) => s,
+        Err(_) => return SCM_ERR_CRYPTO,
+    };
+
+    std::ptr::copy_nonoverlapping(sig.as_ptr(), sig_out, 64);
+    SCM_OK
+}
+
 /// 导出 FFI 跨语言接口: SM2 签名验证
 #[no_mangle]
 pub unsafe extern "C" fn scm_sm2_verify(
@@ -181,6 +218,30 @@ pub unsafe extern "C" fn scm_sm2_verify(
     let msg_slice = std::slice::from_raw_parts(msg, msglen);
 
     if sm2_verify(pk_arr, msg_slice, sig_arr) {
+        SCM_OK
+    } else {
+        SCM_ERR_VERIFY
+    }
+}
+
+/// 导出 FFI 跨语言接口: SM2 针对已哈希摘要 e 进行签名验证
+#[no_mangle]
+pub unsafe extern "C" fn scm_sm2_verify_digest(
+    public_key: *const u8,
+    digest: *const u8,
+    sig: *const u8,
+) -> c_int {
+    if public_key.is_null() || digest.is_null() || sig.is_null() {
+        return SCM_ERR_PARAM;
+    }
+    let pk_arr = &*(public_key as *const [u8; 64]);
+    let sig_arr = &*(sig as *const [u8; 64]);
+    let dig_slice = std::slice::from_raw_parts(digest, 32);
+    let mut dig_arr = [0u8; 32];
+    dig_arr.copy_from_slice(dig_slice);
+    let e = Scalar::from_bytes_be_mod_n(&dig_arr);
+
+    if sm2_verify_digest(pk_arr, &e, sig_arr) {
         SCM_OK
     } else {
         SCM_ERR_VERIFY
